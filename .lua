@@ -37,27 +37,39 @@ local function setNoclip(enable)
     end
 end
 
--- 2. สแกนหา CFrame ของกล่อง "ทั้งหมด" ในแมพ (Chest1, Chest2, Chest3)
-local function getAllChestData()
+-- 2. สแกนหา CFrame ทั้งหมด + เรียงลำดับจาก "ใกล้ไปไกล"
+local function getAllChestDataSorted()
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return {} end
+    local hrpPos = char.HumanoidRootPart.Position
+
     local chestList = {}
 
+    -- ดึงกล่องทั้งหมดในแมพ
     for _, obj in pairs(Workspace:GetDescendants()) do
         if obj:IsA("Model") and (obj.Name == "Chest1" or obj.Name == "Chest2" or obj.Name == "Chest3" or obj.Name:find("Chest")) then
             local part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
             if part and part.Parent and part:IsDescendantOf(Workspace) then
+                local dist = (hrpPos - part.Position).Magnitude
                 table.insert(chestList, {
                     Model = obj,
                     Part = part,
-                    CFrame = part.CFrame
+                    CFrame = part.CFrame,
+                    Distance = dist
                 })
             end
         end
     end
 
+    -- [จุดสำคัญ] เรียงลำดับใน Table จากระยะทางน้อยที่สุดไปมากที่สุด (ใกล้ -> ไกล)
+    table.sort(chestList, function(a, b)
+        return a.Distance < b.Distance
+    end)
+
     return chestList
 end
 
--- 3. ระบบ Tween บินไปที่ CFrame แล้วเช็กว่ากล่องหายไปหรือยัง
+-- 3. ระบบ Tween บินไปที่ CFrame
 local function flyToChestCFrame(chestData)
     local char = LocalPlayer.Character
     if not char or not char:FindFirstChild("HumanoidRootPart") then return end
@@ -72,20 +84,17 @@ local function flyToChestCFrame(chestData)
 
     setNoclip(true)
 
-    -- สั่ง Tween บินไปที่ CFrame ของกล่องตรงๆ
     local tweenInfo = TweenInfo.new(time, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
     currentTween = TweenService:Create(hrp, tweenInfo, {CFrame = targetCFrame})
     currentTween:Play()
 
-    -- วนลูปเช็กระหว่างบิน: ถ้ากล่องโดนเก็บจนหายไปแล้ว (Parent == nil) ให้ยกเลิก Tween ทันที ไม่ต้องบินต่อให้เสียเวลา
     local startTime = tick()
     while CONFIG.AutoFarm do
         task.wait(0.05)
         
-        -- เช็กว่ากล่องหายไปจากแมพแล้วหรือยัง (Parent กลายเป็น nil)
+        -- เช็กว่ากล่องหายไปจากแมพแล้วหรือยัง
         local isChestGone = not targetModel.Parent or not targetPart.Parent or not targetPart:IsDescendantOf(Workspace)
         
-        -- ถ้าบินถึงแล้ว หรือ กล่องหายไปแล้ว หรือ เวลาบินเกินกำหนด
         if isChestGone or (tick() - startTime) >= (time + 0.5) then
             break
         end
@@ -96,7 +105,6 @@ local function flyToChestCFrame(chestData)
         currentTween = nil
     end
 
-    -- ส่งคำสั่งสัมผัส (Touch) เผื่อกล่องยังไม่หาย
     if targetPart and targetPart.Parent and firetouchinterest then
         firetouchinterest(hrp, targetPart, 0)
         task.wait(0.05)
@@ -106,26 +114,24 @@ local function flyToChestCFrame(chestData)
     setNoclip(false)
 end
 
--- 4. ลูปหลัก: สแกนหา CFrame ทั้งหมด -> บินไล่เก็บทีละอันจนหมด -> สแกนใหม่
-local function startListFarmLoop()
+-- 4. ลูปหลัก: สแกนหา CFrame -> เรียงลำดับใกล้ไปไกล -> บินเก็บตามคิว
+local function startSortedListFarmLoop()
     task.spawn(function()
         while CONFIG.AutoFarm do
-            -- Step 1: ดึงรายการ CFrame ของกล่องทั้งหมดในแมพมาเก็บไว้ในรายการ
-            local chestList = getAllChestData()
+            -- ดึงลิสต์กล่องที่เรียงลำดับจากใกล้สุดไปไกลสุดแล้ว
+            local sortedChestList = getAllChestDataSorted()
 
-            if #chestList > 0 then
-                -- Step 2: วนลูปบินไปทีละ CFrame ตามรายการที่สแกนได้
-                for index, chestData in ipairs(chestList) do
+            if #sortedChestList > 0 then
+                for index, chestData in ipairs(sortedChestList) do
                     if not CONFIG.AutoFarm then break end
                     
-                    -- เช็กอีกรอบก่อนบินว่ากล่องใน CFrame นี้ยังอยู่ไหม
+                    -- ตรวจสอบก่อนบินอีกครั้งว่ากล่องตรงพิกัดนี้ยังไม่ถูกเก็บ
                     if chestData.Part and chestData.Part.Parent then
                         flyToChestCFrame(chestData)
-                        task.wait(0.05) -- พัก 0.05 วินาที แล้วไป CFrame ถัดไปทันที
+                        task.wait(0.05)
                     end
                 end
             else
-                -- ถ้าสแกนแล้วไม่พบกล่องเลย ให้รอ 3 วินาทีแล้วสแกนใหม่
                 task.wait(3)
             end
         end
@@ -134,8 +140,8 @@ end
 
 -- 5. Rayfield UI Setup
 local Window = Rayfield:CreateWindow({
-   Name = "CFrame List Scan Farm",
-   LoadingTitle = "Scanning All Chest CFrames...",
+   Name = "Sorted CFrame Chest Hub",
+   LoadingTitle = "Sorting Chests by Distance...",
    ConfigurationSaving = { Enabled = false },
    KeySystem = false
 })
@@ -143,13 +149,13 @@ local Window = Rayfield:CreateWindow({
 local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
 
 FarmTab:CreateToggle({
-   Name = "Auto Farm All CFrames (สแกน CFrame ทั้งหมดแล้วบินไล่เก็บ)",
+   Name = "Auto Farm Chests (เรียงลำดับใกล้ไปไกล)",
    CurrentValue = false,
-   Flag = "Toggle_ListFarm",
+   Flag = "Toggle_SortedFarm",
    Callback = function(Value)
        CONFIG.AutoFarm = Value
        if Value then
-           startListFarmLoop()
+           startSortedListFarmLoop()
        elseif currentTween then
            currentTween:Cancel()
        end
@@ -162,7 +168,7 @@ FarmTab:CreateSlider({
    Increment = 10,
    Suffix = " Speed",
    CurrentValue = 150,
-   Flag = "Slider_ListSpeed",
+   Flag = "Slider_SortedSpeed",
    Callback = function(Value)
        CONFIG.FlySpeed = Value
    end,
