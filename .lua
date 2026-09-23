@@ -6,21 +6,18 @@ local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
     AutoFarm = false,
     FlySpeed = 300,
-    ServerHopWhenEmpty = true,
-    CollectDelay = 0.1
+    ServerHopWhenEmpty = true
 }
 
 local noclipConn = nil
-local CommF = ReplicatedStorage:WaitForChild("Remotes", 5) and ReplicatedStorage.Remotes:WaitForChild("CommF_", 5)
 
--- 1. ระบบ Noclip ป้องกันติดก้อนหิน/กำแพง
+-- 1. ระบบ Noclip ปิดการชน
 local function setNoclip(enable)
     if enable then
         if not noclipConn then
@@ -43,83 +40,78 @@ local function setNoclip(enable)
     end
 end
 
--- 2. ค้นหาหีบโดยเช็คความถูกต้องของ Object
-local function getPriorityChest()
+-- 2. ฟังก์ชั่นหาหีบที่ "อยู่ใกล้ที่สุด" ในขณะนั้น
+local function getClosestChest()
     local char = LocalPlayer.Character
     if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    
     local hrp = char.HumanoidRootPart
-    local chests = {}
+    local closestChest = nil
+    local shortestDistance = math.huge
 
     for _, obj in pairs(Workspace:GetDescendants()) do
         if obj:IsA("Model") and obj.Name:find("Chest") then
             local part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
             if part and part.Parent and part:IsDescendantOf(Workspace) then
-                local priority = 1
-                if obj.Name:find("3") or obj.Name:find("Diamond") then
-                    priority = 3
-                elseif obj.Name:find("2") or obj.Name:find("Gold") then
-                    priority = 2
-                end
-                
                 local dist = (hrp.Position - part.Position).Magnitude
-                table.insert(chests, {Part = part, Dist = dist, Priority = priority})
+                if dist < shortestDistance then
+                    shortestDistance = dist
+                    closestChest = part
+                end
             end
         end
     end
 
-    if #chests == 0 then return nil end
-
-    table.sort(chests, function(a, b)
-        if a.Priority == b.Priority then return a.Dist < b.Dist end
-        return a.Priority > b.Priority
-    end)
-
-    return chests[1].Part
+    return closestChest
 end
 
--- 3. ระบบเคลื่อนที่แบบรวดเร็วและไม่ค้างลูป (Direct CFrame Step)
-local function moveToChest(chestPart)
+-- 3. บินไปเก็บหีบเป้าหมาย
+local function flyToTarget(targetPart)
     local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") or not chestPart or not chestPart.Parent then return end
+    if not char or not char:FindFirstChild("HumanoidRootPart") or not targetPart or not targetPart.Parent then return end
     
     local hrp = char.HumanoidRootPart
     setNoclip(true)
 
-    -- คำนวณระยะทางและกรอบเวลาการบิน
-    local targetCFrame = chestPart.CFrame * CFrame.new(0, 2, 0)
-    local dist = (hrp.Position - targetCFrame.Position).Magnitude
-    local steps = math.clamp(math.floor(dist / (CONFIG.FlySpeed / 30)), 1, 300)
-    
-    for i = 1, steps do
-        if not CONFIG.AutoFarm or not chestPart or not chestPart.Parent then break end
+    -- คำนวณระยะทางและบินเคลื่อนที่ไปทีละก้าว
+    while CONFIG.AutoFarm and targetPart and targetPart.Parent do
+        local currentPos = hrp.Position
+        local targetPos = targetPart.Position + Vector3.new(0, 2, 0)
+        local distance = (targetPos - currentPos).Magnitude
+
+        -- ถ้าเข้าใกล้หีบระยะ 3 หน่วย ถือว่าถึงจุดหมายแล้ว
+        if distance <= 3 then
+            break
+        end
+
+        -- คำนวณ Direction และบินไปข้างหน้าตาม FlySpeed
+        local direction = (targetPos - currentPos).Unit
+        local moveStep = math.min(distance, CONFIG.FlySpeed * 0.03)
         
-        -- ค่อยๆ เคลื่อน CFrame ไปยังจุดหมายทีละ Step โดยไม่พึ่ง Tween
-        hrp.CFrame = hrp.CFrame:Lerp(targetCFrame, i / steps)
+        hrp.CFrame = CFrame.new(currentPos + (direction * moveStep), targetPos)
         hrp.AssemblyLinearVelocity = Vector3.zero
         task.wait(0.01)
     end
 
-    -- วาร์ปเข้าจุดทันทีเมื่อถึงขั้นตอนสุดท้าย
-    if CONFIG.AutoFarm and chestPart and chestPart.Parent then
-        hrp.CFrame = targetCFrame
+    -- Trigger แตะหีบเมื่อถึงจุดหมาย
+    if CONFIG.AutoFarm and targetPart and targetPart.Parent then
+        hrp.CFrame = targetPart.CFrame
         hrp.AssemblyLinearVelocity = Vector3.zero
         
-        -- Trigger เก็บหีบ
         if firetouchinterest then
-            firetouchinterest(hrp, chestPart, 0)
-            task.wait(CONFIG.CollectDelay)
-            firetouchinterest(hrp, chestPart, 1)
+            firetouchinterest(hrp, targetPart, 0)
+            task.wait(0.1)
+            firetouchinterest(hrp, targetPart, 1)
         end
     end
     
     setNoclip(false)
 end
 
--- 4. ระบบ Server Hop
-local function bloxFruitsServerHop()
-    Rayfield:Notify({Title = "Server Hop", Content = "หีบหมดแล้ว กำลังเปลี่ยนเซิร์ฟเวอร์...", Duration = 3})
-    if CommF then pcall(function() CommF:InvokeServer("TravelMain") end) end
-
+-- 4. ระบบ Server Hop เมื่อไม่เจอหีบเหลือแล้ว
+local function serverHop()
+    Rayfield:Notify({Title = "Server Hop", Content = "ไม่พบหีบในระยะแล้ว กำลังเปลี่ยนเซิร์ฟเวอร์...", Duration = 3})
+    
     local placeId = game.PlaceId
     local currentJobId = game.JobId
     local foundServer = nil
@@ -153,18 +145,19 @@ local function bloxFruitsServerHop()
     end
 end
 
--- 5. Main Loop
-local function startFarmLoop()
+-- 5. ลูปการทำงานหลัก (หาใกล้สุด -> บินไปเก็บ -> วนใหม่)
+local function startNearestFarmLoop()
     task.spawn(function()
         while CONFIG.AutoFarm do
-            local chest = getPriorityChest()
-            if chest and chest.Parent then
-                moveToChest(chest)
-                task.wait(0.05)
+            local nearestChest = getClosestChest()
+            
+            if nearestChest and nearestChest.Parent then
+                flyToTarget(nearestChest)
+                task.wait(0.05) -- พักนิดนึงก่อนเช็คหาหีบถัดไป
             else
                 setNoclip(false)
                 if CONFIG.ServerHopWhenEmpty then
-                    bloxFruitsServerHop()
+                    serverHop()
                     break
                 else
                     task.wait(2)
@@ -175,10 +168,10 @@ local function startFarmLoop()
     end)
 end
 
--- 6. Rayfield UI
+-- 6. Rayfield UI Setup
 local Window = Rayfield:CreateWindow({
-   Name = "Blox Fruits - Fixed Chest Farm",
-   LoadingTitle = "Loading Stable System...",
+   Name = "Nearest Chest Farm",
+   LoadingTitle = "Loading Simple System...",
    ConfigurationSaving = { Enabled = false },
    KeySystem = false
 })
@@ -186,21 +179,21 @@ local Window = Rayfield:CreateWindow({
 local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
 
 FarmTab:CreateToggle({
-   Name = "Auto Farm Chest (เปิด/ปิด)",
+   Name = "Auto Farm Nearest Chest (เก็บหีบใกล้ที่สุด)",
    CurrentValue = false,
-   Flag = "Toggle_FixChest",
+   Flag = "Toggle_NearestChest",
    Callback = function(Value)
        CONFIG.AutoFarm = Value
        if Value then
-           startFarmLoop()
+           startNearestFarmLoop()
        end
    end,
 })
 
 FarmTab:CreateToggle({
-   Name = "Server Hop When Empty",
+   Name = "Server Hop When Empty (ย้ายเซิร์ฟเมื่อกล่องหมด)",
    CurrentValue = true,
-   Flag = "Toggle_FixHop",
+   Flag = "Toggle_HopNearest",
    Callback = function(Value)
        CONFIG.ServerHopWhenEmpty = Value
    end,
@@ -212,7 +205,7 @@ FarmTab:CreateSlider({
    Increment = 20,
    Suffix = " Speed",
    CurrentValue = 300,
-   Flag = "Slider_FixSpeed",
+   Flag = "Slider_NearestSpeed",
    Callback = function(Value)
        CONFIG.FlySpeed = Value
    end,
