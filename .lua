@@ -6,18 +6,20 @@ local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
+local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
     AutoFarm = false,
-    FlySpeed = 180, -- ปรับระดับความเร็วให้อยู่ในช่วง Ultra Smooth เนียนตา
+    FlySpeed = 150, -- ล็อคความเร็ว 150 นุ่มนวลกำลังดี
     ServerHopWhenEmpty = true
 }
 
 local noclipConn = nil
+local currentTween = nil
 
--- 1. ระบบ Noclip ไร้แรงปะทะ
+-- 1. ระบบ Noclip ป้องกันการติดก้อนหินระหว่าง Tween
 local function setNoclip(enable)
     if enable then
         if not noclipConn then
@@ -40,7 +42,7 @@ local function setNoclip(enable)
     end
 end
 
--- 2. ค้นหากล่องที่ใกล้ที่สุด
+-- 2. Step 1: สแกนหากล่องที่ใกล้ที่สุด
 local function getClosestChest()
     local char = LocalPlayer.Character
     if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
@@ -65,65 +67,61 @@ local function getClosestChest()
     return closestChest
 end
 
--- 3. ระบบบิน Ultra Smooth ด้วย BodyMovement + Safety Timeout
-local function flyUltraSmooth(targetPart)
+-- 3. Step 2: Tween ตรงไปที่ CFrame ของกล่อง
+local function tweenToChest(chestPart)
     local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") or not targetPart or not targetPart.Parent then return end
+    if not char or not char:FindFirstChild("HumanoidRootPart") or not chestPart or not chestPart.Parent then return end
     
     local hrp = char.HumanoidRootPart
     setNoclip(true)
 
-    -- สร้าง ตัวควบคุมแรงบิน (BodyVelocity & BodyGyro)
-    local bv = Instance.new("BodyVelocity")
-    bv.MaxForce = Vector3.new(1e6, 1e6, 1e6)
-    bv.Velocity = Vector3.zero
-    bv.Parent = hrp
+    -- คำนวณระยะทางและเวลาในการ Tween (ใช้ Speed 150)
+    local targetCFrame = chestPart.CFrame
+    local distance = (hrp.Position - targetCFrame.Position).Magnitude
+    local tweenTime = distance / CONFIG.FlySpeed
 
-    local bg = Instance.new("BodyGyro")
-    bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-    bg.P = 10000 -- เพิ่มความนุ่มนวลในการหมุนหน้าไปหากล่อง
-    bg.CFrame = hrp.CFrame
-    bg.Parent = hrp
+    -- ตั้งค่า TweenInfo (Linear = ความเร็วคงที่นุ่มนวล)
+    local tweenInfo = TweenInfo.new(
+        tweenTime,
+        Enum.EasingStyle.Linear,
+        Enum.EasingDirection.Out
+    )
 
+    -- สร้างและสั่งเล่น Tween ไปที่ CFrame ของกล่องตรงๆ
+    currentTween = TweenService:Create(hrp, tweenInfo, {CFrame = targetCFrame})
+    currentTween:Play()
+
+    -- ตัวแปรเช็คว่า Tween จบหรือยัง
+    local completed = false
+    local conn
+    conn = currentTween.Completed:Connect(function()
+        completed = true
+        if conn then conn:Disconnect() end
+    end)
+
+    -- รอจนกว่า Tween จะเล่นจบ หรือผู้ใช้ปิด AutoFarm
     local startTime = tick()
-    local dist = (hrp.Position - targetPart.Position).Magnitude
-    local maxAllowedTime = (dist / CONFIG.FlySpeed) + 2.5 -- กำหนดเวลาบินสูงสุด ป้องกันการติดค้าง
+    repeat 
+        task.wait(0.05)
+        -- Safety Breakout: เผื่อเกิดการค้าง ให้หลุดออกมาถ้าเวลาเกิน
+    until completed or not CONFIG.AutoFarm or (tick() - startTime) > (tweenTime + 1.5) or not chestPart.Parent
 
-    while CONFIG.AutoFarm and targetPart and targetPart.Parent do
-        local currentPos = hrp.Position
-        local targetPos = targetPart.Position + Vector3.new(0, 1.5, 0)
-        local distance = (targetPos - currentPos).Magnitude
-
-        -- ถึงเป้าหมาย (ระยะห่างน้อยกว่า 4 หน่วย) หรือ บินนานเกินเวลา
-        if distance <= 4 or (tick() - startTime) > maxAllowedTime then
-            break
-        end
-
-        -- เคลื่อนที่แบบ Smooth Vector
-        local direction = (targetPos - currentPos).Unit
-        bv.Velocity = direction * CONFIG.FlySpeed
-        bg.CFrame = CFrame.lookAt(currentPos, targetPos)
-
-        task.wait(0.02)
+    -- ยกเลิก Tween เผื่อปิดกลางทาง
+    if currentTween then
+        currentTween:Cancel()
+        currentTween = nil
     end
 
-    -- ลบตัวควบคุมการบินออกเมื่อถึงจุด
-    bv:Destroy()
-    bg:Destroy()
-    
-    -- ล็อคตำแหน่งหยุดและกดเก็บ
-    if CONFIG.AutoFarm and targetPart and targetPart.Parent then
-        hrp.CFrame = targetPart.CFrame * CFrame.new(0, 1.5, 0)
+    -- Trigger แตะกล่องเพื่อรับเงิน
+    if CONFIG.AutoFarm and chestPart and chestPart.Parent then
         hrp.AssemblyLinearVelocity = Vector3.zero
-        hrp.AssemblyAngularVelocity = Vector3.zero
-
         if firetouchinterest then
-            firetouchinterest(hrp, targetPart, 0)
-            task.wait(0.12)
-            firetouchinterest(hrp, targetPart, 1)
+            firetouchinterest(hrp, chestPart, 0)
+            task.wait(0.05)
+            firetouchinterest(hrp, chestPart, 1)
         end
     end
-    
+
     setNoclip(false)
 end
 
@@ -164,15 +162,15 @@ local function serverHop()
     end
 end
 
--- 5. ลูปหลักค้นหาและบินเก็บ
-local function startSmoothFarmLoop()
+-- 5. Step 3: ลูปทำงาน (สแกนใกล้สุด -> Tween ไป CFrame -> สแกนหาใหม่ทันที)
+local function startTweenFarmLoop()
     task.spawn(function()
         while CONFIG.AutoFarm do
             local nearestChest = getClosestChest()
             
             if nearestChest and nearestChest.Parent then
-                flyUltraSmooth(nearestChest)
-                task.wait(0.1) -- พักจังหวะเล็กน้อยก่อนเริ่มหากล่องถัดไป
+                tweenToChest(nearestChest)
+                task.wait(0.02) -- พักจังหวะแป๊บเดียว แล้ววนลูปสแกนหากล่องใกล้สุดตัวต่อไปทันที
             else
                 setNoclip(false)
                 if CONFIG.ServerHopWhenEmpty then
@@ -183,14 +181,18 @@ local function startSmoothFarmLoop()
                 end
             end
         end
+        
+        if currentTween then
+            currentTween:Cancel()
+        end
         setNoclip(false)
     end)
 end
 
 -- 6. Rayfield UI Setup
 local Window = Rayfield:CreateWindow({
-   Name = "Ultra Smooth Chest Farm",
-   LoadingTitle = "Loading Smooth System...",
+   Name = "Direct CFrame Tween Farm",
+   LoadingTitle = "Loading Direct Tween...",
    ConfigurationSaving = { Enabled = false },
    KeySystem = false
 })
@@ -198,13 +200,15 @@ local Window = Rayfield:CreateWindow({
 local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
 
 FarmTab:CreateToggle({
-   Name = "Auto Farm Chest (Ultra Smooth)",
+   Name = "Auto Farm Chest (Direct Tween CFrame)",
    CurrentValue = false,
-   Flag = "Toggle_SmoothChest",
+   Flag = "Toggle_DirectTween",
    Callback = function(Value)
        CONFIG.AutoFarm = Value
        if Value then
-           startSmoothFarmLoop()
+           startTweenFarmLoop()
+       elseif currentTween then
+           currentTween:Cancel()
        end
    end,
 })
@@ -212,19 +216,19 @@ FarmTab:CreateToggle({
 FarmTab:CreateToggle({
    Name = "Server Hop When Empty",
    CurrentValue = true,
-   Flag = "Toggle_SmoothHop",
+   Flag = "Toggle_DirectHop",
    Callback = function(Value)
        CONFIG.ServerHopWhenEmpty = Value
    end,
 })
 
 FarmTab:CreateSlider({
-   Name = "Fly Speed (แนะนำ 150 - 220)",
-   Range = {80, 350},
+   Name = "Fly Speed",
+   Range = {50, 300},
    Increment = 10,
    Suffix = " Speed",
-   CurrentValue = 180,
-   Flag = "Slider_SmoothSpeed",
+   CurrentValue = 150,
+   Flag = "Slider_DirectSpeed",
    Callback = function(Value)
        CONFIG.FlySpeed = Value
    end,
