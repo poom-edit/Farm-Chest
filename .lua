@@ -17,10 +17,10 @@ local LocalPlayer = Players.LocalPlayer
 -- ==========================================
 local CONFIG = {
     AutoFarm = false,
-    FlySpeed = 280,              -- ความเร็วบิน
-    ServerHopWhenEmpty = true,   -- ย้ายเซิร์ฟอัตโนมัติเมื่อกล่องหมด
-    CollectDelay = 0.15,         -- เวลาหน่วงเก็บกล่อง
-    GlowColor = Color3.fromRGB(0, 255, 180) -- สีไฟใต้เท้า
+    FlySpeed = 280,              
+    ServerHopWhenEmpty = true,   
+    CollectDelay = 0.15,         
+    GlowColor = Color3.fromRGB(0, 255, 180) 
 }
 
 local noclipConn = nil
@@ -56,7 +56,7 @@ function TweenSystem.Play(instance, props, time, style, direction, onComplete)
     conn = tween.Completed:Connect(function(state)
         if conn then conn:Disconnect() end
         if activeTweens[instance] == tween then activeTweens[instance] = nil end
-        if state == Enum.PlaybackState.Completed and onComplete then onComplete() end
+        if onComplete then onComplete() end
     end)
 
     tween:Play()
@@ -180,7 +180,7 @@ local function getPriorityChest()
     for _, obj in pairs(Workspace:GetDescendants()) do
         if obj:IsA("Model") and obj.Name:find("Chest") then
             local part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
-            if part then
+            if part and part.Parent then
                 local priority = 1
                 if obj.Name:find("3") or obj.Name:find("Diamond") or obj.Name:find("Ultra") then
                     priority = 3
@@ -248,14 +248,15 @@ local function bloxFruitsServerHop()
 end
 
 -- ==========================================
--- [5. MAIN FLY & FARM LOGIC]
+-- [5. FIXED FLY & FARM LOGIC]
 -- ==========================================
 local function flyToAndCollect(chestPart)
     local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") or not chestPart then return end
+    if not char or not char:FindFirstChild("HumanoidRootPart") or not chestPart or not chestPart.Parent then return end
 
     local hrp = char.HumanoidRootPart
-    local flyTime = (hrp.Position - chestPart.Position).Magnitude / CONFIG.FlySpeed
+    local distance = (hrp.Position - chestPart.Position).Magnitude
+    local flyTime = distance / CONFIG.FlySpeed
     local completed = false
 
     setNoclip(true)
@@ -268,20 +269,32 @@ local function flyToAndCollect(chestPart)
         "Out",
         { Color = CONFIG.GlowColor, Size = Vector3.new(1.2, 0.2, 1.8), Light = true },
         function()
-            setNoclip(false)
-            hrp.AssemblyLinearVelocity = Vector3.zero
-            hrp.AssemblyAngularVelocity = Vector3.zero
-
-            if firetouchinterest then
-                firetouchinterest(hrp, chestPart, 0)
-                task.wait(CONFIG.CollectDelay)
-                firetouchinterest(hrp, chestPart, 1)
-            end
             completed = true
         end
     )
 
-    repeat task.wait(0.05) until completed or not CONFIG.AutoFarm
+    -- เพิ่มระบบ Timeout ป้องกันการติดลูปค้าง (บวกเวลาเผื่อไว้ 1.5 วินาที)
+    local startTime = tick()
+    repeat 
+        task.wait(0.05) 
+    until completed or (tick() - startTime) >= (flyTime + 1.5) or not CONFIG.AutoFarm
+
+    -- เมื่อบินถึงจุด (หรือโดน Timeout)
+    setNoclip(false)
+    if hrp then
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    -- กดเก็บกล่อง
+    if chestPart and chestPart.Parent and firetouchinterest then
+        firetouchinterest(hrp, chestPart, 0)
+        task.wait(CONFIG.CollectDelay)
+        firetouchinterest(hrp, chestPart, 1)
+    end
+
+    -- ยกเลิก Tween ถ้ายังค้างอยู่
+    TweenSystem.Cancel(char)
 end
 
 local function startFarmLoop()
@@ -297,7 +310,7 @@ local function startFarmLoop()
                     bloxFruitsServerHop()
                     break
                 else
-                    task.wait(3)
+                    task.wait(2)
                 end
             end
         end
@@ -351,7 +364,6 @@ FarmTab:CreateSlider({
    end,
 })
 
--- Handle Error Rejoin
 TeleportService.TeleportInitFailed:Connect(function()
     task.wait(1)
     TeleportService:Teleport(game.PlaceId, LocalPlayer)
