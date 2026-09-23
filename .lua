@@ -11,13 +11,13 @@ local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
     AutoFarm = false,
-    FlySpeed = 300,
+    FlySpeed = 180, -- ปรับระดับความเร็วให้อยู่ในช่วง Ultra Smooth เนียนตา
     ServerHopWhenEmpty = true
 }
 
 local noclipConn = nil
 
--- 1. ระบบ Noclip ปิดการชน
+-- 1. ระบบ Noclip ไร้แรงปะทะ
 local function setNoclip(enable)
     if enable then
         if not noclipConn then
@@ -40,7 +40,7 @@ local function setNoclip(enable)
     end
 end
 
--- 2. ฟังก์ชั่นหาหีบที่ "อยู่ใกล้ที่สุด" ในขณะนั้น
+-- 2. ค้นหากล่องที่ใกล้ที่สุด
 local function getClosestChest()
     local char = LocalPlayer.Character
     if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
@@ -65,42 +65,61 @@ local function getClosestChest()
     return closestChest
 end
 
--- 3. บินไปเก็บหีบเป้าหมาย
-local function flyToTarget(targetPart)
+-- 3. ระบบบิน Ultra Smooth ด้วย BodyMovement + Safety Timeout
+local function flyUltraSmooth(targetPart)
     local char = LocalPlayer.Character
     if not char or not char:FindFirstChild("HumanoidRootPart") or not targetPart or not targetPart.Parent then return end
     
     local hrp = char.HumanoidRootPart
     setNoclip(true)
 
-    -- คำนวณระยะทางและบินเคลื่อนที่ไปทีละก้าว
+    -- สร้าง ตัวควบคุมแรงบิน (BodyVelocity & BodyGyro)
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    bv.Velocity = Vector3.zero
+    bv.Parent = hrp
+
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+    bg.P = 10000 -- เพิ่มความนุ่มนวลในการหมุนหน้าไปหากล่อง
+    bg.CFrame = hrp.CFrame
+    bg.Parent = hrp
+
+    local startTime = tick()
+    local dist = (hrp.Position - targetPart.Position).Magnitude
+    local maxAllowedTime = (dist / CONFIG.FlySpeed) + 2.5 -- กำหนดเวลาบินสูงสุด ป้องกันการติดค้าง
+
     while CONFIG.AutoFarm and targetPart and targetPart.Parent do
         local currentPos = hrp.Position
-        local targetPos = targetPart.Position + Vector3.new(0, 2, 0)
+        local targetPos = targetPart.Position + Vector3.new(0, 1.5, 0)
         local distance = (targetPos - currentPos).Magnitude
 
-        -- ถ้าเข้าใกล้หีบระยะ 3 หน่วย ถือว่าถึงจุดหมายแล้ว
-        if distance <= 3 then
+        -- ถึงเป้าหมาย (ระยะห่างน้อยกว่า 4 หน่วย) หรือ บินนานเกินเวลา
+        if distance <= 4 or (tick() - startTime) > maxAllowedTime then
             break
         end
 
-        -- คำนวณ Direction และบินไปข้างหน้าตาม FlySpeed
+        -- เคลื่อนที่แบบ Smooth Vector
         local direction = (targetPos - currentPos).Unit
-        local moveStep = math.min(distance, CONFIG.FlySpeed * 0.03)
-        
-        hrp.CFrame = CFrame.new(currentPos + (direction * moveStep), targetPos)
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        task.wait(0.01)
+        bv.Velocity = direction * CONFIG.FlySpeed
+        bg.CFrame = CFrame.lookAt(currentPos, targetPos)
+
+        task.wait(0.02)
     end
 
-    -- Trigger แตะหีบเมื่อถึงจุดหมาย
+    -- ลบตัวควบคุมการบินออกเมื่อถึงจุด
+    bv:Destroy()
+    bg:Destroy()
+    
+    -- ล็อคตำแหน่งหยุดและกดเก็บ
     if CONFIG.AutoFarm and targetPart and targetPart.Parent then
-        hrp.CFrame = targetPart.CFrame
+        hrp.CFrame = targetPart.CFrame * CFrame.new(0, 1.5, 0)
         hrp.AssemblyLinearVelocity = Vector3.zero
-        
+        hrp.AssemblyAngularVelocity = Vector3.zero
+
         if firetouchinterest then
             firetouchinterest(hrp, targetPart, 0)
-            task.wait(0.1)
+            task.wait(0.12)
             firetouchinterest(hrp, targetPart, 1)
         end
     end
@@ -108,9 +127,9 @@ local function flyToTarget(targetPart)
     setNoclip(false)
 end
 
--- 4. ระบบ Server Hop เมื่อไม่เจอหีบเหลือแล้ว
+-- 4. ระบบ Server Hop
 local function serverHop()
-    Rayfield:Notify({Title = "Server Hop", Content = "ไม่พบหีบในระยะแล้ว กำลังเปลี่ยนเซิร์ฟเวอร์...", Duration = 3})
+    Rayfield:Notify({Title = "Server Hop", Content = "ไม่พบหีบแล้ว กำลังเปลี่ยนเซิร์ฟเวอร์...", Duration = 3})
     
     local placeId = game.PlaceId
     local currentJobId = game.JobId
@@ -145,15 +164,15 @@ local function serverHop()
     end
 end
 
--- 5. ลูปการทำงานหลัก (หาใกล้สุด -> บินไปเก็บ -> วนใหม่)
-local function startNearestFarmLoop()
+-- 5. ลูปหลักค้นหาและบินเก็บ
+local function startSmoothFarmLoop()
     task.spawn(function()
         while CONFIG.AutoFarm do
             local nearestChest = getClosestChest()
             
             if nearestChest and nearestChest.Parent then
-                flyToTarget(nearestChest)
-                task.wait(0.05) -- พักนิดนึงก่อนเช็คหาหีบถัดไป
+                flyUltraSmooth(nearestChest)
+                task.wait(0.1) -- พักจังหวะเล็กน้อยก่อนเริ่มหากล่องถัดไป
             else
                 setNoclip(false)
                 if CONFIG.ServerHopWhenEmpty then
@@ -170,8 +189,8 @@ end
 
 -- 6. Rayfield UI Setup
 local Window = Rayfield:CreateWindow({
-   Name = "Nearest Chest Farm",
-   LoadingTitle = "Loading Simple System...",
+   Name = "Ultra Smooth Chest Farm",
+   LoadingTitle = "Loading Smooth System...",
    ConfigurationSaving = { Enabled = false },
    KeySystem = false
 })
@@ -179,33 +198,33 @@ local Window = Rayfield:CreateWindow({
 local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
 
 FarmTab:CreateToggle({
-   Name = "Auto Farm Nearest Chest (เก็บหีบใกล้ที่สุด)",
+   Name = "Auto Farm Chest (Ultra Smooth)",
    CurrentValue = false,
-   Flag = "Toggle_NearestChest",
+   Flag = "Toggle_SmoothChest",
    Callback = function(Value)
        CONFIG.AutoFarm = Value
        if Value then
-           startNearestFarmLoop()
+           startSmoothFarmLoop()
        end
    end,
 })
 
 FarmTab:CreateToggle({
-   Name = "Server Hop When Empty (ย้ายเซิร์ฟเมื่อกล่องหมด)",
+   Name = "Server Hop When Empty",
    CurrentValue = true,
-   Flag = "Toggle_HopNearest",
+   Flag = "Toggle_SmoothHop",
    Callback = function(Value)
        CONFIG.ServerHopWhenEmpty = Value
    end,
 })
 
 FarmTab:CreateSlider({
-   Name = "Fly Speed",
-   Range = {100, 500},
-   Increment = 20,
+   Name = "Fly Speed (แนะนำ 150 - 220)",
+   Range = {80, 350},
+   Increment = 10,
    Suffix = " Speed",
-   CurrentValue = 300,
-   Flag = "Slider_NearestSpeed",
+   CurrentValue = 180,
+   Flag = "Slider_SmoothSpeed",
    Callback = function(Value)
        CONFIG.FlySpeed = Value
    end,
